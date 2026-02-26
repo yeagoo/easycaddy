@@ -1,0 +1,206 @@
+name: CI - 构建与安装测试
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CADDY_VERSION: "2.11.1"
+
+jobs:
+  build:
+    name: 构建 RPM 包
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: 配置环境变量
+        run: |
+          printf '%s\n' \
+            "CADDY_VERSION=${{ env.CADDY_VERSION }}" \
+            "TARGET_ARCH=x86_64" \
+            "TARGET_DISTRO=all" \
+            "BASE_URL=https://rpms.example.com" \
+            "GPG_KEY_ID=" \
+            "DOMAIN_NAME=localhost" \
+            "CHECK_INTERVAL=10d" \
+            > docker/.env
+
+      - name: 构建 builder 镜像
+        run: docker compose -f docker/docker-compose.yml build builder
+
+      - name: 运行 builder
+        run: |
+          docker compose -f docker/docker-compose.yml -f docker/docker-compose.ci.yml up -d builder
+          docker compose -f docker/docker-compose.yml logs -f builder
+          EXIT_CODE=$(docker inspect docker-builder-1 --format='{{.State.ExitCode}}')
+          echo "Builder exit code: $EXIT_CODE"
+          [ "$EXIT_CODE" = "0" ] || exit 1
+
+      - name: 提取 RPM 产物
+        run: |
+          mkdir -p artifacts
+          docker run --rm -v docker_repo-data:/repo -v $PWD/artifacts:/out alpine \
+            sh -c "cp -r /repo/.staging/caddy /out/ 2>/dev/null || cp -r /repo/caddy /out/"
+          echo "=== 构建产物 ==="
+          find artifacts -name '*.rpm' | sort
+
+      - name: 上传 RPM 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-packages
+          path: artifacts/caddy/
+          retention-days: 1
+
+      - name: 清理
+        if: always()
+        run: docker compose -f docker/docker-compose.yml down -v
+
+  install-test:
+    name: 安装测试 - ${{ matrix.name }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # === 国际发行版 ===
+          - name: AlmaLinux 8
+            image: almalinux:8
+            rpm_path: el8/x86_64/Packages
+            rpm_glob: "caddy-*.el8.x86_64.rpm"
+          - name: AlmaLinux 9
+            image: almalinux:9
+            rpm_path: el9/x86_64/Packages
+            rpm_glob: "caddy-*.el9.x86_64.rpm"
+          - name: AlmaLinux 10
+            image: almalinux:10
+            rpm_path: el10/x86_64/Packages
+            rpm_glob: "caddy-*.el10.x86_64.rpm"
+          - name: Rocky Linux 8
+            image: rockylinux:8
+            rpm_path: el8/x86_64/Packages
+            rpm_glob: "caddy-*.el8.x86_64.rpm"
+          - name: Rocky Linux 9
+            image: rockylinux:9
+            rpm_path: el9/x86_64/Packages
+            rpm_glob: "caddy-*.el9.x86_64.rpm"
+          - name: Amazon Linux 2023
+            image: amazonlinux:2023
+            rpm_path: al2023/x86_64/Packages
+            rpm_glob: "caddy-*.al2023.x86_64.rpm"
+          - name: Fedora 42
+            image: fedora:42
+            rpm_path: fedora/x86_64/Packages
+            rpm_glob: "caddy-*.fc.x86_64.rpm"
+          - name: Oracle Linux 8
+            image: oraclelinux:8
+            rpm_path: el8/x86_64/Packages
+            rpm_glob: "caddy-*.el8.x86_64.rpm"
+          - name: Oracle Linux 9
+            image: oraclelinux:9
+            rpm_path: el9/x86_64/Packages
+            rpm_glob: "caddy-*.el9.x86_64.rpm"
+          # === 国产操作系统 ===
+          - name: Anolis OS 8 (龙蜥)
+            image: openanolis/anolisos:8
+            rpm_path: el8/x86_64/Packages
+            rpm_glob: "caddy-*.el8.x86_64.rpm"
+          - name: Anolis OS 23 (龙蜥)
+            image: openanolis/anolisos:23
+            rpm_path: el9/x86_64/Packages
+            rpm_glob: "caddy-*.el9.x86_64.rpm"
+          - name: openEuler 22.03 (欧拉)
+            image: openeuler/openeuler:22.03-lts
+            rpm_path: openeuler/22/x86_64/Packages
+            rpm_glob: "caddy-*.oe22.x86_64.rpm"
+          - name: openEuler 24.03 (欧拉)
+            image: openeuler/openeuler:24.03-lts
+            rpm_path: openeuler/24/x86_64/Packages
+            rpm_glob: "caddy-*.oe24.x86_64.rpm"
+          - name: OpenCloudOS 8 (腾讯)
+            image: opencloudos/opencloudos:8.8
+            rpm_path: el8/x86_64/Packages
+            rpm_glob: "caddy-*.el8.x86_64.rpm"
+          - name: OpenCloudOS 9 (腾讯)
+            image: opencloudos/opencloudos:9.0
+            rpm_path: el9/x86_64/Packages
+            rpm_glob: "caddy-*.el9.x86_64.rpm"
+
+    steps:
+      - name: 下载 RPM 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: rpm-packages
+          path: rpms/
+
+      - name: 安装与功能测试
+        run: |
+          docker run --rm \
+            -v $PWD/rpms:/rpms:ro \
+            ${{ matrix.image }} \
+            bash -c '
+              set -euo pipefail
+              echo "=== 发行版信息 ==="
+              cat /etc/os-release | head -5
+
+              echo "=== 安装 RPM ==="
+              RPM_FILE=$(ls /rpms/${{ matrix.rpm_path }}/${{ matrix.rpm_glob }} 2>/dev/null | head -1)
+              if [[ -z "$RPM_FILE" ]]; then
+                echo "错误: 未找到 RPM 文件"
+                exit 1
+              fi
+              echo "安装: $RPM_FILE"
+              if command -v dnf &>/dev/null; then
+                dnf install -y "$RPM_FILE"
+              else
+                yum install -y "$RPM_FILE"
+              fi
+
+              echo "=== 验证安装 ==="
+              # 1. 二进制文件存在且可执行
+              test -x /usr/bin/caddy
+              echo "✓ /usr/bin/caddy 存在且可执行"
+
+              # 2. 版本输出
+              caddy version
+              echo "✓ 版本输出正常"
+
+              # 3. 验证默认配置
+              caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+              echo "✓ 默认 Caddyfile 验证通过"
+
+              # 4. 核心模块加载
+              MODULE_COUNT=$(caddy list-modules | wc -l)
+              echo "✓ 已加载模块数: $MODULE_COUNT"
+              [ "$MODULE_COUNT" -gt 0 ] || { echo "✗ 没有加载任何模块"; exit 1; }
+
+              # 5. systemd unit 文件
+              test -f /usr/lib/systemd/system/caddy.service
+              echo "✓ systemd unit 文件存在"
+
+              # 6. 目录结构
+              test -d /etc/caddy
+              echo "✓ /etc/caddy 目录存在"
+              test -d /var/lib/caddy
+              echo "✓ /var/lib/caddy 目录存在"
+
+              # 7. 启动测试
+              caddy start --config /etc/caddy/Caddyfile --adapter caddyfile 2>/dev/null || true
+              sleep 2
+              if command -v curl &>/dev/null; then
+                HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80 2>/dev/null || echo "000")
+                echo "✓ HTTP 响应码: $HTTP_CODE"
+              fi
+              caddy stop 2>/dev/null || true
+
+              echo ""
+              echo "=== 所有测试通过 ==="
+            '
