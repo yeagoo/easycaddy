@@ -4,11 +4,11 @@
 # 构建上下文为项目根目录：
 #   docker build -f docker/scheduler/Dockerfile .
 
-FROM fedora:41
+FROM almalinux:10
 
 # 依赖安装层
 RUN dnf install -y curl dnf-plugins-core && \
-    dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo && \
+    dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo && \
     dnf install -y docker-ce-cli docker-compose-plugin && \
     dnf clean all && \
     useradd -r -m -s /sbin/nologin scheduler
