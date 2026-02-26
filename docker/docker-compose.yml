@@ -1,4 +1,11 @@
 services:
+  volume-init:
+    image: alpine:3
+    restart: "no"
+    volumes:
+      - repo-data:/repo
+    command: ["sh", "-c", "chown -R 1500:1500 /repo"]
+
   builder:
     build:
       context: ..
@@ -7,6 +14,9 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
     volumes:
       - repo-data:/repo
       - ../vendor:/app/vendor:ro
@@ -33,6 +43,8 @@ services:
       - /tmp
       - /home/signer/.gnupg
     depends_on:
+      volume-init:
+        condition: service_completed_successfully
       builder:
         condition: service_completed_successfully
     volumes:

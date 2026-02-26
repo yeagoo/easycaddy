@@ -1,6 +1,6 @@
 # Docker 容器化 RPM 仓库构建系统
 
-自动构建、签名并托管 Caddy RPM 仓库的容器化方案。系统将 `build-repo.sh` 拆分为 5 个职责单一的容器，通过 Docker Compose 编排，支持无人值守的自动版本更新。
+自动构建、签名并托管 Caddy RPM 仓库的容器化方案。系统将 `build-repo.sh` 拆分为职责单一的容器，通过 Docker Compose 编排，支持无人值守的自动版本更新。
 
 ## 目录
 
@@ -17,7 +17,7 @@
 
 ## 系统架构
 
-系统由 5 个容器组成，通过共享 Volume 传递数据：
+系统由 6 个容器组成，通过共享 Volume 传递数据：
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
@@ -39,13 +39,12 @@
                       │  (Caddy)   │     │ (管理 API)   │
                       │  :80/:443  │     │   :8080      │
                       └────────────┘     └──────────────┘
-                            │                    │
-                      ┌─────▼────────────────────▼─────┐
-                      │           客户端 / 管理员       │
-                      └────────────────────────────────┘
+
+辅助容器:
+  volume-init ── 初始化 repo-data 卷权限（alpine，启动后立即退出）
 
 Volume 关系:
-  repo-data   ── Builder (读写) / Signer (读写) / Repo Server (只读) / Scheduler (读写)
+  repo-data   ── volume-init (读写) / Builder (读写) / Signer (读写) / Repo Server (只读) / Scheduler (读写)
   gpg-keys    ── Signer (只读)
 ```
 
@@ -53,11 +52,25 @@ Volume 关系:
 
 | 容器 | 类型 | 职责 |
 |------|------|------|
-| Builder | 一次性任务 | 执行 `build-repo.sh --stage build`，构建 RPM 包 |
+| volume-init | 初始化（启动即退出） | 设置 `repo-data` 卷的文件权限（UID/GID 1500） |
+| Builder | 一次性任务 | 执行 `build-repo.sh --stage build`，下载 Caddy 并构建 RPM 包 |
 | Signer | 一次性任务 | 执行 `--stage sign` 和 `--stage publish`，GPG 签名并原子发布 |
 | Repo Server | 常驻服务 | Caddy 静态文件服务，提供 HTTP/HTTPS 访问 |
-| Scheduler | 常驻服务 | 按周期检查 Caddy 新版本，自动触发构建 |
+| Scheduler | 常驻服务 | 按周期检查 Caddy 新版本，自动触发 Builder → Signer 构建链 |
 | Repo Manager | 常驻服务（可选） | 管理 API，支持手动触发构建、回滚、状态查询 |
+
+**容器依赖关系：**
+
+```
+volume-init → builder → signer
+                          ↑
+                      scheduler (定时触发)
+```
+
+- `volume-init` 最先运行，确保卷权限正确后退出
+- `builder` 等待 `volume-init` 成功后启动
+- `signer` 等待 `volume-init` 和 `builder` 都成功后启动
+- `scheduler` 常驻运行，定时通过 Docker socket 触发 builder → signer
 
 ---
 
@@ -107,7 +120,7 @@ chmod 600 gpg-keys/private.gpg
 
 ## 快速开始
 
-从克隆仓库到 RPM 仓库可用，只需 5 步：
+### 首次部署（完整流程）
 
 ```bash
 # 1. 克隆仓库
@@ -117,26 +130,62 @@ git clone https://github.com/yourorg/caddy-rpm-repo.git && cd caddy-rpm-repo
 cp docker/.env.example docker/.env
 # 编辑 docker/.env，至少设置 GPG_KEY_ID 和 DOMAIN_NAME
 
-# 3. 准备 GPG 密钥（将私钥放入 gpg-keys 目录）
-mkdir -p gpg-keys && cp /path/to/your/private.gpg gpg-keys/ && chmod 600 gpg-keys/private.gpg
+# 3. 准备 GPG 密钥
+mkdir -p gpg-keys
+cp /path/to/your/private.gpg gpg-keys/
+chmod 600 gpg-keys/private.gpg
 
-# 4. 构建并启动服务
+# 4. 构建镜像
+docker compose -f docker/docker-compose.yml build
+
+# 5. 启动所有服务
 docker compose -f docker/docker-compose.yml up -d
 
-# 5. 验证服务运行
-docker compose -f docker/docker-compose.yml ps
+# 6. 查看服务状态
+docker compose -f docker/docker-compose.yml ps -a
 ```
 
-`.env` 配置示例：
+### 仅构建 RPM（不启动常驻服务）
+
+如果只想构建 RPM 包，不需要启动 Repo Server 和 Scheduler：
+
+```bash
+# 构建镜像（首次或 Dockerfile 变更后）
+docker compose -f docker/docker-compose.yml build builder signer
+
+# 启动 builder（会自动先运行 volume-init）
+docker compose -f docker/docker-compose.yml up -d builder
+
+# 查看构建日志
+docker compose -f docker/docker-compose.yml logs -f builder
+
+# builder 成功后启动 signer 签名
+docker compose -f docker/docker-compose.yml up -d signer
+```
+
+### 构建指定版本
+
+默认情况下，builder 会自动查询 GitHub 获取最新 Caddy 版本。也可以在 `.env` 中指定版本：
+
+```bash
+# 方式 1：写入 .env 文件
+echo "CADDY_VERSION=2.11.1" >> docker/.env
+
+# 方式 2：命令行临时指定
+CADDY_VERSION=2.11.1 docker compose -f docker/docker-compose.yml up -d builder
+```
+
+> **提示：** 显式指定版本号可以避免构建时依赖外网访问 GitHub API，推荐在网络受限环境中使用。
+
+### `.env` 最小配置示例
 
 ```bash
 # docker/.env
+CADDY_VERSION=2.11.1               # 可选：留空则自动查询最新版本
 GPG_KEY_ID=ABCDEF1234567890        # 必填：你的 GPG 密钥 ID
 DOMAIN_NAME=rpms.example.com       # 你的域名
 CHECK_INTERVAL=10d                 # 每 10 天检查一次新版本
 ```
-
-启动后，Scheduler 会立即执行一次版本检查并触发首次构建。构建完成后，RPM 仓库即可通过 `https://rpms.example.com` 访问。
 
 ---
 
@@ -148,7 +197,7 @@ CHECK_INTERVAL=10d                 # 每 10 天检查一次新版本
 
 | 变量名 | 说明 | 默认值 | 必填 |
 |--------|------|--------|------|
-| `CADDY_VERSION` | Caddy 版本号，留空则自动查询最新版本 | 自动查询 | 否 |
+| `CADDY_VERSION` | Caddy 版本号，留空则自动查询最新版本（需外网） | 自动查询 | 否 |
 | `TARGET_ARCH` | 目标架构（`x86_64`、`aarch64`、`all`） | `all` | 否 |
 | `TARGET_DISTRO` | 目标发行版（`distro:version,...`、`all`） | `all` | 否 |
 | `BASE_URL` | `.repo` 模板中的基础 URL | `https://rpms.example.com` | 否 |
@@ -192,22 +241,66 @@ docker compose -f docker/docker-compose.yml -f docker/docker-compose.ci.yml run 
 
 ## 运维操作
 
-以下命令均在项目根目录执行，使用 `-f docker/docker-compose.yml` 指定编排文件。为简洁起见，后续示例省略 `-f` 参数，你可以设置别名：
+以下命令均在项目根目录执行。为简洁起见，建议设置别名：
 
 ```bash
 alias dc='docker compose -f docker/docker-compose.yml'
 ```
 
+### 查看服务状态
+
+```bash
+# 查看所有容器状态（包括已退出的一次性容器）
+dc ps -a
+
+# 预期状态：
+#   volume-init  — Exited (0)（正常，初始化完成即退出）
+#   builder      — Exited (0)（正常，构建完成即退出）
+#   signer       — Exited (0) 或 Created（等待 builder 完成）
+#   repo-server  — Up（常驻）
+#   scheduler    — Up（常驻）
+```
+
+### 重新构建镜像
+
+修改 Dockerfile 或脚本后需要重新构建：
+
+```bash
+# 构建所有镜像
+dc build
+
+# 仅构建指定服务
+dc build builder signer
+```
+
 ### 手动触发构建
 
 ```bash
-# 构建最新版本
-dc run --rm builder
-dc run --rm signer
+# 构建最新版本（自动查询 GitHub）
+dc up -d builder
+# 等待 builder 完成后
+dc up -d signer
 
 # 构建指定版本
-dc run --rm -e CADDY_VERSION=2.9.1 builder
-dc run --rm -e CADDY_VERSION=2.9.1 signer
+CADDY_VERSION=2.11.1 dc up -d builder
+# 等待 builder 完成后
+dc up -d signer
+```
+
+### 查看构建日志
+
+```bash
+# 查看 builder 日志
+dc logs builder
+
+# 查看 signer 日志
+dc logs signer
+
+# 实时跟踪 scheduler 日志
+dc logs -f scheduler
+
+# 查看所有服务日志
+dc logs
 ```
 
 ### 回滚到上一版本
@@ -220,30 +313,14 @@ curl -X POST -H "Authorization: Bearer YOUR_API_TOKEN" http://localhost:8080/api
 dc run --rm signer bash /app/build-repo.sh --rollback --output /repo
 ```
 
-### 查看构建日志
-
-```bash
-# 查看所有服务日志
-dc logs
-
-# 查看特定服务日志
-dc logs scheduler
-dc logs builder
-dc logs signer
-
-# 实时跟踪日志
-dc logs -f scheduler
-```
-
 ### 查看当前已构建版本
 
 ```bash
 # 方式 1：读取版本状态文件
-docker compose -f docker/docker-compose.yml exec repo-server cat /srv/repo/caddy/.current-version
+dc exec repo-server cat /srv/repo/caddy/.current-version
 
 # 方式 2：通过管理 API 查询（需启用 Repo Manager）
 curl -H "Authorization: Bearer YOUR_API_TOKEN" http://localhost:8080/api/status
-# 返回: {"last_build_time":"...","version":"2.9.1","status":"success"}
 ```
 
 ### 修改检查周期
@@ -271,137 +348,100 @@ chmod 600 gpg-keys/private.gpg
 # GPG_KEY_ID=NEW_KEY_ID
 
 # 3. 重新执行一次完整构建（使用新密钥重新签名所有包）
-dc run --rm builder
-dc run --rm signer
+dc up -d builder
+# 等待完成后
+dc up -d signer
 ```
 
-### 更换域名
+### 完全清理重建
 
 ```bash
-# 1. 更新 .env 中的 DOMAIN_NAME
-# DOMAIN_NAME=new-rpms.example.com
+# 停止所有容器并删除卷（会丢失已构建的 RPM 包）
+dc down -v
 
-# 2. 如果 BASE_URL 也需要更新
-# BASE_URL=https://new-rpms.example.com
-
-# 3. 重启 Repo Server（Caddy 会自动为新域名获取证书）
-dc restart repo-server
-
-# 4. 重新构建以更新 .repo 模板中的 URL
-dc run --rm builder
-dc run --rm signer
+# 重新构建镜像并启动
+dc build
+dc up -d
 ```
 
 ---
 
 ## 故障排查
 
-### 构建失败
+### Builder 退出码 3：版本查询 / 下载失败
 
-**症状：** Builder 容器以非零退出码退出。
+**症状：** 日志显示 `查询 Caddy 版本失败: 无法访问 GitHub Releases API`
 
-**排查步骤：**
+**原因：** 容器无法访问外网，或 GitHub API 限流。
+
+**解决方法：**
 
 ```bash
-# 查看构建日志
-dc logs builder
+# 方法 1（推荐）：在 .env 中指定版本号，跳过 GitHub API 查询
+echo "CADDY_VERSION=2.11.1" >> docker/.env
+
+# 方法 2：配置 GitHub Token 避免限流
+echo "GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx" >> docker/.env
 ```
 
-**常见原因及解决方法：**
+### Builder 退出码 1：权限被拒绝
 
-| 退出码 | 原因 | 解决方法 |
-|--------|------|---------|
-| 2 | 构建依赖缺失 | 检查 Dockerfile 中的依赖安装是否完整，重新构建镜像 |
-| 3 | 下载失败 / 版本查询失败 | 检查网络连接，确认 GitHub API 可访问 |
-| 4 | nfpm 打包失败 | 检查 `packaging/` 目录中的配置文件 |
+**症状：** 日志显示 `Permission denied` 写入 `/repo`
+
+**原因：** `repo-data` 卷的所有权不正确。`volume-init` 容器负责设置权限，可能未正常运行。
+
+**解决方法：**
 
 ```bash
-# 重新构建镜像
-dc build builder
+# 检查 volume-init 是否成功
+dc ps -a | grep volume-init
+# 应显示 Exited (0)
 
-# 重试构建
-dc run --rm builder
+# 如果 volume-init 失败，手动修复卷权限
+docker run --rm -v docker_repo-data:/repo alpine chown -R 1500:1500 /repo
+
+# 或者清理卷重新开始
+dc down -v
+dc up -d
 ```
 
 ### 签名失败
 
 **症状：** Signer 容器以非零退出码退出。
 
-**排查步骤：**
-
 ```bash
 dc logs signer
 ```
 
-**常见原因及解决方法：**
-
 | 问题 | 原因 | 解决方法 |
 |------|------|---------|
 | 权限错误拒绝启动 | GPG 密钥文件权限不是 600 或 400 | `chmod 600 gpg-keys/private.gpg` |
-| 密钥导入失败 | 密钥文件损坏或格式错误 | 重新导出密钥：`gpg --export-secret-keys KEY_ID > gpg-keys/private.gpg` |
-| 签名失败 | GPG_KEY_ID 与密钥文件不匹配 | 确认 `.env` 中的 `GPG_KEY_ID` 与导出的密钥 ID 一致 |
-
-### API 限流
-
-**症状：** Scheduler 日志中出现 `GitHub API 查询失败`。
-
-**原因：** GitHub API 匿名访问限制为 60 次/小时。
-
-**解决方法：**
-
-```bash
-# 在 .env 中配置 GitHub Token
-GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-
-# 重启 Scheduler
-dc restart scheduler
-```
-
-配置 Token 后，API 限制提升至 5000 次/小时。
+| 密钥导入失败 | 密钥文件损坏或格式错误 | 重新导出：`gpg --export-secret-keys KEY_ID > gpg-keys/private.gpg` |
+| 签名失败 | GPG_KEY_ID 与密钥文件不匹配 | 确认 `.env` 中的 `GPG_KEY_ID` 与密钥一致 |
 
 ### 证书获取失败
 
 **症状：** Repo Server 启动后 HTTPS 不可用。
 
-**排查步骤：**
-
 ```bash
 dc logs repo-server
 ```
 
-**常见原因及解决方法：**
-
 | 问题 | 解决方法 |
 |------|---------|
-| 域名未解析到服务器 IP | 检查 DNS 记录，确保域名指向正确的 IP |
+| 域名未解析到服务器 IP | 检查 DNS 记录 |
 | 端口 80/443 被占用 | 停止占用端口的服务，或修改端口映射 |
-| 防火墙阻止 ACME 验证 | 开放 80 和 443 端口的入站流量 |
+| 防火墙阻止 ACME 验证 | 开放 80 和 443 端口 |
 | 使用 `localhost` 域名 | Caddy 对 `localhost` 使用自签名证书，这是正常行为 |
 
 ### 磁盘空间不足
-
-**症状：** 构建失败，日志中出现磁盘空间相关错误。
-
-**排查步骤：**
 
 ```bash
 # 查看 Docker 磁盘使用
 docker system df
 
-# 查看 Volume 使用情况
-docker volume ls
-```
-
-**解决方法：**
-
-```bash
-# 清理未使用的 Docker 资源
+# 清理未使用的资源
 docker system prune -f
-
-# 清理未使用的 Volume（谨慎操作）
-docker volume prune -f
-
-# 清理旧的构建镜像缓存
 docker builder prune -f
 ```
 
@@ -411,18 +451,11 @@ docker builder prune -f
 
 ### 使用 install-caddy.sh（推荐）
 
-最简单的方式是使用 `install-caddy.sh` 脚本的 `--mirror` 参数：
-
 ```bash
-# 使用自建仓库安装 Caddy
 curl -fsSL https://rpms.example.com/caddy/templates/install-caddy.sh | bash -s -- --mirror https://rpms.example.com
 ```
 
-脚本会自动配置 `.repo` 文件、导入 GPG 公钥并安装 Caddy。
-
 ### 手动配置 .repo 文件
-
-如果需要手动配置，根据你的发行版创建对应的 `.repo` 文件：
 
 **RHEL / CentOS / Rocky Linux / AlmaLinux 8：**
 
@@ -460,13 +493,10 @@ gpgcheck=1
 gpgkey=https://rpms.example.com/caddy/gpg.key
 ```
 
-配置完成后安装 Caddy：
+配置完成后安装：
 
 ```bash
-# 导入 GPG 公钥
 rpm --import https://rpms.example.com/caddy/gpg.key
-
-# 安装 Caddy
 dnf install caddy
 ```
 
@@ -474,38 +504,40 @@ dnf install caddy
 
 ## 安全注意事项
 
+### 容器用户与卷权限
+
+- Builder 和 Signer 容器使用统一的 UID/GID（1500），确保对共享卷 `repo-data` 的读写权限一致
+- `volume-init` 容器在每次启动时以 root 身份运行 `chown -R 1500:1500 /repo`，确保卷权限正确
+- 所有业务容器以非 root 用户运行
+
 ### GPG 密钥管理
 
-- GPG 私钥文件权限**必须**设置为 `600` 或 `400`，否则 Signer 容器拒绝启动
+- GPG 私钥文件权限**必须**设置为 `600` 或 `400`
 - 私钥通过独立的 `gpg-keys` Volume 挂载，仅 Signer 容器可访问（只读）
 - Builder、Repo Server、Scheduler 容器**无法**访问 GPG 密钥
-- Signer 容器在退出时自动清除内存中的 GPG 密钥材料（`gpgconf --kill gpg-agent` + `rm -rf ~/.gnupg`）
-- 建议将 `gpg-keys/` 目录加入 `.gitignore`，避免密钥被提交到版本控制
+- 建议将 `gpg-keys/` 目录加入 `.gitignore`
 
 ### Docker Socket 风险
 
-Scheduler 和 Repo Manager 容器挂载了 Docker socket（`/var/run/docker.sock`），用于启动 Builder 和 Signer 容器。这意味着：
+Scheduler 和 Repo Manager 挂载了 Docker socket（`/var/run/docker.sock`）：
 
-- 这两个容器拥有**宿主机级别的 Docker 控制权限**
-- 恶意代码可能通过 Docker socket 逃逸到宿主机
+- 这两个容器拥有宿主机级别的 Docker 控制权限
 - **缓解措施：**
-  - 两个容器均配置了 `no-new-privileges:true`
-  - 容器运行在隔离的 `internal` 网络中，不暴露端口到外部
-  - Repo Manager 需要 Bearer Token 认证才能执行操作
-  - 如果不需要自动构建，可以不启动 Scheduler，改为手动触发
-  - 如果不需要管理 API，Repo Manager 默认不启动（需 `--profile management`）
+  - 配置了 `no-new-privileges:true`
+  - 运行在隔离的 `internal` 网络中
+  - Repo Manager 需要 Bearer Token 认证
+  - 不需要自动构建时可不启动 Scheduler
+  - Repo Manager 默认不启动（需 `--profile management`）
 
 ### 网络隔离
 
-系统定义了两个 Docker 网络：
+| 网络 | 类型 | 连接的容器 |
+|------|------|-----------|
+| `internal` | bridge (internal) | 所有容器（不可访问外部网络） |
+| `external` | bridge | Builder、Repo Server、Repo Manager |
 
-| 网络 | 类型 | 说明 |
-|------|------|------|
-| `internal` | bridge (internal) | 容器间内部通信，**不可访问外部网络** |
-| `external` | bridge | 仅 Repo Server 和 Repo Manager 连接，用于对外提供服务 |
-
-- Builder 和 Signer 仅连接 `internal` 网络，无法直接访问互联网（Builder 通过 Scheduler 触发时由 Scheduler 的网络环境提供连接）
-- 所有容器配置了 `no-new-privileges:true` 安全选项
-- Builder 和 Signer 容器使用只读文件系统（`read_only: true`），仅允许写入指定的 Volume 和 tmpfs
-- Builder 和 Signer 容器丢弃所有 Linux capabilities（`cap_drop: ALL`）
-- 所有容器以非 root 用户运行
+- Builder 连接 `external` 网络以访问 GitHub API 和 Caddy 下载服务器
+- Signer 仅连接 `internal` 网络，无法访问外网
+- 所有容器配置了 `no-new-privileges:true`
+- Builder 和 Signer 使用只读文件系统（`read_only: true`），仅允许写入 Volume 和 tmpfs
+- Builder 和 Signer 丢弃所有 Linux capabilities（`cap_drop: ALL`）
