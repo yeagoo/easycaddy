@@ -17,6 +17,7 @@ services:
       - BASE_URL
     networks:
       - internal
+      - external
     security_opt:
       - no-new-privileges:true
     cap_drop:
