@@ -10,13 +10,16 @@ FROM almalinux:10
 # 依赖安装层（仅签名所需的最小依赖集）
 RUN dnf install -y gnupg2 rpm-sign && \
     dnf clean all && \
-    useradd -r -m -s /sbin/nologin signer
+    groupadd -r -g 1500 appuser && \
+    useradd -r -m -s /sbin/nologin -u 1500 -g appuser signer
 
 # 脚本复制层（与依赖层分离，利用层缓存）
 COPY build-repo.sh /app/build-repo.sh
 COPY packaging/ /app/packaging/
 COPY docker/signer/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
+
+RUN mkdir -p /repo && chown signer:signer /repo
 
 USER signer
 WORKDIR /app
