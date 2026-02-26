@@ -2,9 +2,9 @@ name: CI - 构建与安装测试
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 permissions:
   contents: read
