@@ -29,7 +29,7 @@ COPY packaging/ /app/packaging/
 COPY docker/builder/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-RUN mkdir -p /repo && chown builder:builder /repo
+RUN mkdir -p /repo && chown builder:appuser /repo
 
 USER builder
 WORKDIR /app

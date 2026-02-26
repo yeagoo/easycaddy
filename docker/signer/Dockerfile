@@ -19,7 +19,7 @@ COPY packaging/ /app/packaging/
 COPY docker/signer/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-RUN mkdir -p /repo && chown signer:signer /repo
+RUN mkdir -p /repo && chown signer:appuser /repo
 
 USER signer
 WORKDIR /app
