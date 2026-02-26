@@ -25,6 +25,7 @@ OS_CLASS=""                 # "standard_deb" | "standard_rpm" | "unsupported_rpm
 OS_ARCH=""                  # "amd64" | "arm64" | "loongarch64" | "riscv64"
 OS_ARCH_RAW=""              # uname -m 原始值
 EPEL_VERSION=""             # EPEL 兼容版本: "8" | "9"
+OS_MAJOR_VERSION=""         # 发行版原生主版本号（用于自建仓库路径）
 PKG_MANAGER=""              # "apt" | "dnf" | "yum"
 
 # === 运行时状态 ===
@@ -275,6 +276,9 @@ detect_classify() {
     # 提取主版本号（取 VERSION_ID 中第一个 '.' 之前的部分）
     major_version="${OS_VERSION_ID%%.*}"
 
+    # 默认设置 OS_MAJOR_VERSION 为 major_version，特殊发行版在各分支中覆盖
+    OS_MAJOR_VERSION="$major_version"
+
     case "$OS_ID" in
         # 标准 Debian 系
         debian|ubuntu)
@@ -317,8 +321,10 @@ detect_classify() {
                 # V10 → EPEL 8（检查 VERSION_ID 包含 "V10" 或主版本为 10）
                 if [[ "$OS_VERSION_ID" == *V10* || "$major_version" == "10" ]]; then
                     EPEL_VERSION="8"
+                    OS_MAJOR_VERSION="V10"
                 else
                     EPEL_VERSION="8"
+                    OS_MAJOR_VERSION="V11"
                 fi
             else
                 OS_CLASS="unknown"
@@ -329,6 +335,7 @@ detect_classify() {
             if [[ "$OS_VERSION_ID" == "2023" ]]; then
                 OS_CLASS="unsupported_rpm"
                 EPEL_VERSION="9"
+                OS_MAJOR_VERSION="2023"
             else
                 OS_CLASS="unknown"
             fi
@@ -534,19 +541,26 @@ install_copr_repo() {
 _SELFHOSTED_DEFAULT_BASE_URL="https://repo.example.com"
 
 # 生成 DNF .repo 配置文件内容
-# 参数: $1 — 基础 URL, $2 — EPEL 版本, $3 — 架构（原始 uname -m 值）
+# 参数: $1 — 基础 URL, $2 — 发行版 ID (OS_ID), $3 — 主版本号 (OS_MAJOR_VERSION), $4 — 架构（原始 uname -m 值）
 # 输出: .repo 文件内容到 stdout
+# 使用发行版友好路径: {base_url}/caddy/{distro_id}/{version}/$basearch/
+# Requirements: 19.1, 19.3, 19.4, 19.5
 _generate_dnf_repo_content() {
     local base_url="$1"
-    local epel_version="$2"
-    local arch="$3"
+    local distro_id="$2"
+    local distro_version="$3"
+    local arch="$4"
+
+    # 使用 OS_NAME 作为人类可读名称，回退到 distro_id
+    local display_name="${OS_NAME:-$distro_id}"
 
     cat <<EOF
 [caddy-selfhosted]
-name=Caddy Self-Hosted Repository (EPEL ${epel_version} - ${arch})
-baseurl=${base_url}/caddy/${epel_version}/${arch}/
+name=Caddy Self-Hosted Repository (${display_name} ${distro_version} - ${arch})
+baseurl=${base_url}/caddy/${distro_id}/${distro_version}/\$basearch/
 enabled=1
 gpgcheck=1
+repo_gpgcheck=1
 gpgkey=${base_url}/caddy/gpg.key
 EOF
 }
@@ -562,7 +576,7 @@ install_selfhosted_repo() {
     # 步骤 1: 写入 .repo 配置文件
     util_log_info "配置自建 DNF 仓库..."
     local repo_content
-    repo_content="$(_generate_dnf_repo_content "$base_url" "$EPEL_VERSION" "$OS_ARCH_RAW")"
+    repo_content="$(_generate_dnf_repo_content "$base_url" "$OS_ID" "$OS_MAJOR_VERSION" "$OS_ARCH_RAW")"
     if ! printf '%s\n' "$repo_content" | _run_privileged tee "$repo_file" >/dev/null; then
         util_log_error "写入仓库配置文件失败: ${repo_file}"
         return 1
@@ -803,15 +817,18 @@ main() {
     # 8. 检测是否已安装
     if check_installed; then
         if [[ -z "$OPT_VERSION" ]]; then
+            # 未指定 --version，已安装即跳过
             util_log_success "Caddy 已安装: ${CADDY_BIN}"
             printf '%s\n' "$CADDY_BIN"
             exit 0
         fi
         if check_version_match; then
+            # 版本匹配，跳过安装
             util_log_success "Caddy ${OPT_VERSION} 已安装，无需更新"
             printf '%s\n' "$CADDY_BIN"
             exit 0
         fi
+        # 版本不匹配，继续安装流程
         util_log_info "已安装的 Caddy 版本与目标版本 ${OPT_VERSION} 不一致，将进行更新"
     fi
 
@@ -819,9 +836,11 @@ main() {
     local install_rc=0
 
     if [[ "$OPT_METHOD" == "binary" ]]; then
+        # 用户明确指定二进制下载
         INSTALL_METHOD_USED="binary"
         install_binary_download
     else
+        # 根据 OS_CLASS 选择安装方式
         case "$OS_CLASS" in
             standard_deb)
                 INSTALL_METHOD_USED="apt"
@@ -839,6 +858,7 @@ main() {
                 install_selfhosted_repo || install_rc=$?
                 ;;
             unknown|*)
+                # 未知 OS 直接使用二进制下载
                 INSTALL_METHOD_USED="binary"
                 util_log_info "未知操作系统分类，使用二进制下载安装..."
                 install_binary_download
@@ -846,12 +866,14 @@ main() {
                 ;;
         esac
 
-        # Fallback 逻辑
+        # Fallback 逻辑：包仓库失败时的处理
         if [[ "$install_rc" -ne 0 ]]; then
             if [[ "$OPT_METHOD" == "repo" ]]; then
+                # 用户明确指定仅使用仓库，不回退
                 util_log_error "包仓库安装失败，--method=repo 模式下不回退到二进制下载"
                 exit 1
             fi
+            # 自动回退到二进制下载
             util_log_warn "包仓库安装失败，回退到二进制下载方式..."
             INSTALL_METHOD_USED="binary"
             install_binary_download
@@ -869,6 +891,7 @@ main() {
     fi
 
     if [[ -z "$CADDY_BIN" ]]; then
+        # 尝试常见路径
         if [[ -x "/usr/bin/caddy" ]]; then
             CADDY_BIN="/usr/bin/caddy"
         elif [[ -x "/usr/local/bin/caddy" ]]; then

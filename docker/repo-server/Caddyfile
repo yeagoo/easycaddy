@@ -1,0 +1,18 @@
+{$DOMAIN_NAME:localhost} {
+    root * /srv/repo
+    file_server browse
+
+    # repomd.xml 不缓存，确保客户端获取最新元数据
+    @repomd path */repodata/repomd.xml
+    header @repomd Cache-Control "no-cache, must-revalidate"
+
+    # RPM 包文件缓存 1 天
+    @rpm path *.rpm
+    header @rpm Cache-Control "max-age=86400"
+
+    # 访问日志
+    log {
+        output stdout
+        format json
+    }
+}

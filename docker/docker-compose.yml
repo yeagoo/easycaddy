@@ -1,0 +1,124 @@
+services:
+  builder:
+    build:
+      context: ..
+      dockerfile: docker/builder/Dockerfile
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - repo-data:/repo
+      - ../vendor:/app/vendor:ro
+    environment:
+      - CADDY_VERSION
+      - TARGET_ARCH
+      - TARGET_DISTRO
+      - BASE_URL
+    networks:
+      - internal
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  signer:
+    build:
+      context: ..
+      dockerfile: docker/signer/Dockerfile
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/signer/.gnupg
+    depends_on:
+      builder:
+        condition: service_completed_successfully
+    volumes:
+      - repo-data:/repo
+      - gpg-keys:/gpg-keys:ro
+    environment:
+      - GPG_KEY_ID
+    networks:
+      - internal
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  repo-server:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    volumes:
+      - repo-data:/srv/repo:ro
+      - ./repo-server/Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN_NAME
+    networks:
+      - internal
+      - external
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+
+  scheduler:
+    build:
+      context: ..
+      dockerfile: docker/scheduler/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - repo-data:/repo
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - CHECK_INTERVAL
+      - GITHUB_TOKEN
+    networks:
+      - internal
+    security_opt:
+      - no-new-privileges:true
+
+  repo-manager:
+    build:
+      context: ..
+      dockerfile: docker/repo-manager/Dockerfile
+    restart: unless-stopped
+    profiles:
+      - management
+    volumes:
+      - repo-data:/repo
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8080:8080"
+    environment:
+      - API_TOKEN
+      - MANAGER_PORT
+    networks:
+      - internal
+      - external
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      - repo-server
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  repo-data:
+  gpg-keys:
+
+networks:
+  internal:
+    driver: bridge
+    internal: true
+  external:
+    driver: bridge

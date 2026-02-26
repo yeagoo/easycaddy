@@ -344,6 +344,7 @@ reset_script_globals() {
     OS_ARCH=""
     OS_ARCH_RAW=""
     EPEL_VERSION=""
+    OS_MAJOR_VERSION=""
     PKG_MANAGER=""
 
     CADDY_BIN=""

@@ -1,0 +1,10 @@
+services:
+  repo-server:
+    profiles:
+      - disabled
+  repo-manager:
+    profiles:
+      - disabled
+  scheduler:
+    profiles:
+      - disabled
