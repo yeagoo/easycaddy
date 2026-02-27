@@ -181,6 +181,12 @@ resolve_product_lines() {
     done
 
     TARGET_PRODUCT_LINES=("${result[@]}")
+
+    # 如果解析后产品线列表为空，说明所有指定的 distro 都被跳过或无效
+    if [[ ${#TARGET_PRODUCT_LINES[@]} -eq 0 ]]; then
+        util_log_error "没有有效的目标产品线（所有指定的 distro 均被跳过或不支持）"
+        exit "$EXIT_ARG_ERROR"
+    fi
 }
 
 # ----------------------------------------------------------------------------
@@ -1358,11 +1364,24 @@ atomic_publish() {
     if [[ -d "$staging_sm" ]]; then
         util_log_info "发布国密产品线目录: caddy-sm/"
         if [[ -d "$production_sm" ]]; then
-            rm -rf "$production_sm"
-        fi
-        if ! mv "$staging_sm" "$production_sm"; then
-            util_log_error "国密产品线目录发布失败"
-            exit "$EXIT_PUBLISH_FAIL"
+            # 先备份旧目录，再移入新目录，避免 rm -rf 后 mv 失败导致数据丢失
+            local sm_backup="${OPT_OUTPUT}/.caddy-sm.bak.$$"
+            if ! mv "$production_sm" "$sm_backup"; then
+                util_log_error "国密产品线旧目录备份失败"
+                exit "$EXIT_PUBLISH_FAIL"
+            fi
+            if ! mv "$staging_sm" "$production_sm"; then
+                util_log_error "国密产品线目录发布失败，正在恢复旧目录..."
+                mv "$sm_backup" "$production_sm" 2>/dev/null || true
+                exit "$EXIT_PUBLISH_FAIL"
+            fi
+            # 新目录就位后再删除旧备份
+            rm -rf "$sm_backup"
+        else
+            if ! mv "$staging_sm" "$production_sm"; then
+                util_log_error "国密产品线目录发布失败"
+                exit "$EXIT_PUBLISH_FAIL"
+            fi
         fi
     fi
 

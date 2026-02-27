@@ -67,18 +67,21 @@ handle_request() {
     local path="$2"
     local auth_header="${3:-}"
 
-    # 认证检查
+    # 健康检查端点免认证
+    if [[ "${method} ${path}" == "GET /api/status" ]]; then
+        local status_json
+        status_json="$(get_status_json)"
+        send_response 200 "OK" "$status_json"
+        return
+    fi
+
+    # 其余端点需要认证
     if ! check_auth "$auth_header"; then
         send_response 401 "Unauthorized" '{"error":"unauthorized"}'
         return
     fi
 
     case "${method} ${path}" in
-        "GET /api/status")
-            local status_json
-            status_json="$(get_status_json)"
-            send_response 200 "OK" "$status_json"
-            ;;
         "POST /api/build")
             docker compose run --rm builder && docker compose run --rm signer
             local build_time
@@ -104,6 +107,29 @@ handle_request() {
 # 支持测试时 source 单独函数
 if [[ "${_SOURCED_FOR_TEST:-}" == "true" ]]; then
     return 0 2>/dev/null || true
+fi
+
+# === --handle-connection 分支：由 socat 子进程调用，处理单个 HTTP 连接 ===
+if [[ "${1:-}" == "--handle-connection" ]]; then
+    # 从 stdin 读取 HTTP 请求行和头部
+    read -r request_line || true
+    method="$(printf '%s' "$request_line" | awk '{print $1}')"
+    path="$(printf '%s' "$request_line" | awk '{print $2}')"
+
+    auth_header=""
+    while IFS= read -r header_line; do
+        # 去除 \r
+        header_line="${header_line%%$'\r'}"
+        # 空行表示头部结束
+        [[ -z "$header_line" ]] && break
+        # 提取 Authorization 头
+        if [[ "$header_line" == Authorization:* ]]; then
+            auth_header="${header_line#Authorization: }"
+        fi
+    done
+
+    handle_request "$method" "$path" "$auth_header"
+    exit 0
 fi
 
 # === 主循环：使用 socat 监听 HTTP 请求 ===
