@@ -4,7 +4,7 @@
 # 构建上下文为项目根目录：
 #   docker build -f docker/scheduler/Dockerfile .
 
-FROM almalinux:10
+FROM almalinux:10.0
 
 # 依赖安装层
 RUN dnf install -y curl dnf-plugins-core && \

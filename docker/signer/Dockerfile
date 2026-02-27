@@ -5,7 +5,7 @@
 # 构建上下文为项目根目录：
 #   docker build -f docker/signer/Dockerfile .
 
-FROM almalinux:10
+FROM almalinux:10.0
 
 # 依赖安装层（仅签名所需的最小依赖集）
 RUN dnf install -y gnupg2 rpm-sign && \

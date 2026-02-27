@@ -25,6 +25,7 @@ services:
       - TARGET_ARCH
       - TARGET_DISTRO
       - BASE_URL
+      - GITHUB_TOKEN
     networks:
       - internal
       - external
@@ -78,6 +79,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 15s
     security_opt:
       - no-new-privileges:true
 
@@ -86,6 +88,8 @@ services:
       context: ..
       dockerfile: docker/scheduler/Dockerfile
     restart: unless-stopped
+    group_add:
+      - "${DOCKER_GID:-999}"
     volumes:
       - repo-data:/repo
       - /var/run/docker.sock:/var/run/docker.sock
@@ -96,6 +100,8 @@ services:
       - internal
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
 
   repo-manager:
     build:
@@ -104,6 +110,8 @@ services:
     restart: unless-stopped
     profiles:
       - management
+    group_add:
+      - "${DOCKER_GID:-999}"
     volumes:
       - repo-data:/repo
       - /var/run/docker.sock:/var/run/docker.sock
@@ -120,6 +128,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 10s
     depends_on:
       - repo-server
     security_opt:

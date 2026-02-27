@@ -323,7 +323,7 @@ detect_classify() {
                     EPEL_VERSION="8"
                     OS_MAJOR_VERSION="V10"
                 else
-                    EPEL_VERSION="8"
+                    EPEL_VERSION="9"
                     OS_MAJOR_VERSION="V11"
                 fi
             else
@@ -467,11 +467,27 @@ install_apt_repo() {
 
     # 步骤 2: 获取 GPG 密钥
     util_log_info "获取 Caddy GPG 密钥..."
-    if ! curl --connect-timeout 30 --max-time 120 -fSL "$gpg_key_url" \
-        | _run_privileged gpg --dearmor -o "$gpg_key_path"; then
-        util_log_error "获取或安装 GPG 密钥失败: ${gpg_key_url}"
+    # 先下载到临时文件，避免 curl 部分失败时写入损坏的密钥
+    if [[ -z "$TEMP_DIR" || ! -d "$TEMP_DIR" ]]; then
+        TEMP_DIR="$(mktemp -d)"
+    fi
+    local gpg_tmp="${TEMP_DIR}/caddy-gpg.key"
+    if ! curl --connect-timeout 30 --max-time 120 -fSL -o "$gpg_tmp" "$gpg_key_url"; then
+        util_log_error "获取 GPG 密钥失败: ${gpg_key_url}"
+        rm -f "$gpg_tmp"
         return 1
     fi
+    if [[ ! -s "$gpg_tmp" ]]; then
+        util_log_error "下载的 GPG 密钥文件为空"
+        rm -f "$gpg_tmp"
+        return 1
+    fi
+    if ! _run_privileged gpg --dearmor -o "$gpg_key_path" < "$gpg_tmp"; then
+        util_log_error "GPG 密钥 dearmor 失败"
+        rm -f "$gpg_tmp"
+        return 1
+    fi
+    rm -f "$gpg_tmp"
 
     # 步骤 3: 写入 APT 源文件
     util_log_info "配置 APT 源..."

@@ -393,6 +393,11 @@ check_dependencies() {
         suggestions+=("  rpm: dnf install rpm")
     fi
 
+    if ! command -v flock >/dev/null 2>&1; then
+        missing+=("flock")
+        suggestions+=("  flock: dnf install util-linux")
+    fi
+
     if [[ ${#missing[@]} -gt 0 ]]; then
         util_log_error "缺少必要工具: ${missing[*]}"
         util_log_error "安装建议:"
@@ -447,7 +452,9 @@ resolve_version() {
 
     util_log_info "查询 Caddy 最新稳定版本..."
     local api_response
-    api_response="$(curl -fsSL "https://api.github.com/repos/caddyserver/caddy/releases/latest" 2>/dev/null)" || {
+    local curl_args=(-fsSL)
+    [[ -n "${GITHUB_TOKEN:-}" ]] && curl_args+=(-H "Authorization: token ${GITHUB_TOKEN}")
+    api_response="$(curl "${curl_args[@]}" "https://api.github.com/repos/caddyserver/caddy/releases/latest" 2>/dev/null)" || {
         util_log_error "查询 Caddy 版本失败: 无法访问 GitHub Releases API"
         exit "$EXIT_DOWNLOAD_FAIL"
     }
@@ -1352,6 +1359,11 @@ atomic_publish() {
     util_log_info "原子交换: ${staging_caddy} → ${production_dir}"
     if ! mv "$staging_caddy" "$production_dir"; then
         util_log_error "原子交换失败，staging 目录保留: ${staging_caddy}"
+        # 尝试恢复备份（如果刚才做了备份）
+        if [[ -n "${rollback_dir:-}" && -d "${rollback_dir}/caddy" ]]; then
+            util_log_error "正在恢复备份..."
+            mv "${rollback_dir}/caddy" "$production_dir" 2>/dev/null || true
+        fi
         exit "$EXIT_PUBLISH_FAIL"
     fi
 
@@ -1426,17 +1438,35 @@ rollback_latest() {
 
     # Remove current production directory if it exists
     if [[ -d "$production_dir" ]]; then
-        util_log_info "删除当前正式目录: ${production_dir}"
-        rm -rf "$production_dir"
+        util_log_info "移除当前正式目录: ${production_dir}"
+        local rollback_tmp="${production_dir}.rollback-tmp.$$"
+        if ! mv "$production_dir" "$rollback_tmp"; then
+            util_log_error "移除当前正式目录失败"
+            exit "$EXIT_PUBLISH_FAIL"
+        fi
     fi
 
     # Move the backup caddy/ to production
     if [[ ! -d "${latest_backup}/caddy" ]]; then
         util_log_error "备份目录中不存在 caddy/ 子目录: ${latest_backup}"
+        # 恢复刚才移走的正式目录
+        if [[ -d "${rollback_tmp:-}" ]]; then
+            mv "$rollback_tmp" "$production_dir" 2>/dev/null || true
+        fi
         exit "$EXIT_PUBLISH_FAIL"
     fi
 
-    mv "${latest_backup}/caddy" "$production_dir"
+    if ! mv "${latest_backup}/caddy" "$production_dir"; then
+        util_log_error "回滚 mv 失败"
+        # 恢复刚才移走的正式目录
+        if [[ -d "${rollback_tmp:-}" ]]; then
+            mv "$rollback_tmp" "$production_dir" 2>/dev/null || true
+        fi
+        exit "$EXIT_PUBLISH_FAIL"
+    fi
+
+    # mv 成功后再删除旧的正式目录
+    rm -rf "${rollback_tmp:-}" 2>/dev/null || true
 
     # Clean up the empty backup directory
     rmdir "$latest_backup" 2>/dev/null || true
@@ -1806,6 +1836,15 @@ main() {
     check_dependencies
     if [[ -n "${OPT_GPG_KEY_ID:-}" ]]; then
         check_gpg_key "$OPT_GPG_KEY_ID"
+    fi
+
+    # 获取构建锁，防止并发构建竞争 staging 目录
+    local lock_file="${OPT_OUTPUT}/.build.lock"
+    mkdir -p "$OPT_OUTPUT"
+    exec 9>"$lock_file"
+    if ! flock -n 9; then
+        util_log_error "另一个构建进程正在运行（锁文件: ${lock_file}），请稍后重试"
+        exit "$EXIT_PUBLISH_FAIL"
     fi
 
     # Execute stage(s)

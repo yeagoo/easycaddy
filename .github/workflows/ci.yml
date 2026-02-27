@@ -38,11 +38,8 @@ jobs:
 
       - name: 运行 builder
         run: |
-          docker compose -f docker/docker-compose.yml -f docker/docker-compose.ci.yml up -d builder
-          docker compose -f docker/docker-compose.yml logs -f builder
-          EXIT_CODE=$(docker inspect docker-builder-1 --format='{{.State.ExitCode}}')
-          echo "Builder exit code: $EXIT_CODE"
-          [ "$EXIT_CODE" = "0" ] || exit 1
+          docker compose -f docker/docker-compose.yml -f docker/docker-compose.ci.yml run --rm builder
+        working-directory: ${{ github.workspace }}
 
       - name: 提取 RPM 产物
         run: |

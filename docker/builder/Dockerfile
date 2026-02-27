@@ -6,13 +6,13 @@
 #   docker build -f docker/builder/Dockerfile .
 
 # 阶段 1：安装 nfpm
-FROM almalinux:10 AS nfpm-installer
+FROM almalinux:10.0 AS nfpm-installer
 RUN dnf install -y golang && \
     go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest && \
     dnf clean all
 
 # 阶段 2：运行时环境
-FROM almalinux:10
+FROM almalinux:10.0
 
 # 依赖安装层（变更频率低，利用层缓存）
 RUN dnf install -y createrepo_c curl rpm-build rpm-sign gnupg2 && \
